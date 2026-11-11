@@ -1,0 +1,8 @@
+# Model-runtime versions recorded in the completed diagnostic.
+# Install the Torch wheel suitable for your CUDA environment separately.
+# The recorded environment used torch 2.9.1+cu128.
+torch==2.9.1
+transformers==5.19.0
+accelerate>=1,<2
+Pillow>=10,<14
+huggingface-hub

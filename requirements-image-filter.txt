@@ -1,0 +1,8 @@
+# Image-only filtering dependencies; no Torch/CLIP/MLLM is required.
+# The exact CPU probe environment is recorded in its requirements-lock.txt.
+numpy>=2,<3
+Pillow>=10,<14
+opencv-python-headless>=4.10,<6
+scikit-image>=0.24,<0.27
+# Optional for decoding video prefixes with probe_video_image_filter.py.
+av>=16,<20

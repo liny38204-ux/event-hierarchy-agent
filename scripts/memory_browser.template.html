@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>层级视频记忆</title>
+<style>
+body{font:16px/1.6 system-ui,sans-serif;max-width:1100px;margin:36px auto;padding:0 20px;color:#172231;background:#f6f8fb}
+select{font:inherit;padding:6px}details{background:#fff;border:1px solid #d8e0ea;border-radius:8px;margin:12px 0;padding:12px}
+details details{margin-left:18px}summary{cursor:pointer;font-weight:600}p{white-space:pre-wrap;overflow-wrap:anywhere}
+.frames{display:flex;gap:10px;flex-wrap:wrap}figure{margin:0}img{max-width:240px;height:140px;object-fit:contain}figcaption,.muted{font-size:14px;color:#607080}
+</style>
+<h1>层级视频记忆</h1>
+<p class="muted">P 大事件 → PH 阶段 → 当前 E 事件 → 直接帧证据</p>
+<label>视频 <select id="video"></select></label><p id="status"></p><main id="tree"></main>
+<script id="memory" type="application/json">__MEMORY_DATA__</script>
+<script>
+const data=JSON.parse(document.getElementById('memory').textContent);
+const select=document.getElementById('video'), tree=document.getElementById('tree');
+function el(tag,text){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n}
+function branch(title,open=false){const d=el('details');d.open=open;d.append(el('summary',title));return d}
+function interval(n){return `${n.start.toFixed(2)}–${n.end.toFixed(2)} 秒`}
+for(const v of data.videos){const o=el('option',v.video_id);o.value=v.video_id;select.append(o)}
+function render(){
+ const video=data.videos.find(v=>v.video_id===select.value),s=video.store;tree.replaceChildren();
+ document.getElementById('status').textContent=`${data.synthetic?'合成示例 · ':''}观察至 ${s.observed_until.toFixed(2)} 秒 · ${Object.keys(s.episodes).length} 个大事件 / ${Object.keys(s.phases).length} 个阶段 / ${Object.keys(s.events).length} 个当前事件 / ${Object.keys(s.frames).length} 帧`;
+ function event(id){const e=s.events[id],d=branch(`${id} · ${interval(e)}`);d.append(el('p',e.caption));const images=el('div');images.className='frames';for(const fid of e.frame_ids){const f=s.frames[fid],figure=el('figure'),img=el('img');img.src=f.image;img.alt=`${fid} @ ${f.time.toFixed(2)}s`;img.loading='lazy';figure.append(img,el('figcaption',img.alt));images.append(figure)}d.append(images);return d}
+ for(const p of Object.values(s.episodes).sort((a,b)=>a.start-b.start)){
+  const parent=branch(`${p.id} · ${p.title} · ${interval(p)}`,true);parent.append(el('p',p.summary));
+  for(const id of p.phase_ids){const ph=s.phases[id],closed=ph.status==='closed',d=branch(`${id} · ${ph.title} · ${interval(ph)} · ${closed?'已结束':'进行中'}`);d.append(el('p',ph.summary));if(closed)d.append(el('p',`结束确认于 ${ph.closed_at.toFixed(2)} 秒 · ${s.completed_phase_ids.includes(id)?'已整体合并':'等待合并'}`));ph.event_ids.forEach(e=>d.append(event(e)));parent.append(d)}tree.append(parent)
+ }
+ if(s.roots.length){const pending=branch('待组织缓存 · 尚未确定阶段',true);s.roots.forEach(e=>pending.append(event(e)));tree.append(pending)}
+}
+select.addEventListener('change',render);render();
+</script>
+</html>
