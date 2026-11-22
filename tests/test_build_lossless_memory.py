@@ -18,6 +18,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'src'), str(ROOT / 'scripts')]
 
 
+LABELS = ['pick cup', 'place plate', 'open drawer', 'wash bowl', 'cut bread', 'pour water',
+          'stir soup', 'wipe table', 'close lid', 'fold towel', 'peel apple', 'add salt']
+
+
 class Encoder:
     def encode(self, pixels):
         return pixels.astype(float).mean(axis=(0, 1)) + 1e-3
@@ -35,9 +39,18 @@ class Backend:
         self.calls.append({'stage': stage, 'finish_reason': 'stop', 'text': text})
         n = len(self.calls)
         if stage.startswith('write'):
-            return json.dumps({'caption': f'A person moves object {n} onto the counter.',
+            if 'Entity registry: empty' in text:
+                person = {'ref': 'N1', 'kind': 'person', 'label': 'person in gray apron',
+                          'appearance': 'adult in a gray apron'}
+            else:
+                assert '"ref": "H1"' in text, 'registry must be shown to the writer'
+                person = {'ref': 'H1', 'appearance': 'adult in a gray apron'}
+            return json.dumps({'caption': f'The camera pans across the kitchen.\nA person moves object {n} onto the counter.',
                                'summary': f'A person handles object {n} in a kitchen.',
-                               'changes': [{'object': f'object {n}', 'change': 'placed', 'result': 'on the counter'}],
+                               'entities': [person],
+                               'changes': [{'object': 'camera', 'ref': '', 'change': 'pans', 'result': 'to the sink'},
+                                           {'object': 'person', 'ref': person['ref'], 'change': 'moved object',
+                                            'result': 'object on the counter'}],
                                'keywords': ['object', 'kitchen counter']})
         if stage.startswith('summarize'):
             return json.dumps({'phase_summary': 'Someone handles objects at the counter.',
@@ -48,7 +61,8 @@ class Backend:
             first = payload['current'] is None and k == 0
             out.append({'event_id': eid, 'phase': 'new' if first else 'current',
                         'episode': 'new' if first else '', 'phase_title': 'kitchen work' if first else '',
-                        'episode_title': 'cooking' if first else '', 'step': 'new', 'step_label': f'step for {eid}'})
+                        'episode_title': 'cooking' if first else '', 'step': 'new',
+                        'step_label': LABELS[int(eid[1:]) % len(LABELS)]})
         return json.dumps({'placements': out})
 
 
@@ -111,6 +125,15 @@ class BuildLosslessE2E(unittest.TestCase):
         self.assertTrue(placer_inputs)
         self.assertTrue(all('onto the counter.' not in t for t in placer_inputs))
         self.assertEqual(len(v12['steps']), len(v12['events']))
+        # one person, reused across every event; camera narration filtered out
+        self.assertEqual(list(v12['entities']), ['H1'])
+        self.assertEqual(v12['entities']['H1']['event_ids'], sorted(v12['events'], key=lambda e: int(e[1:])))
+        self.assertTrue(all('camera' not in e['caption'].lower() for e in v12['events'].values()))
+        metrics = result['metrics']
+        self.assertEqual(metrics['camera_lines_dropped'], metrics['segments'])
+        self.assertEqual(metrics['camera_changes_dropped'], metrics['segments'])
+        self.assertEqual(metrics['entities_reused'], metrics['segments'] - 1)
+        self.assertEqual(metrics['entities'], 1)
 
 
 if __name__ == '__main__':

@@ -9,17 +9,21 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
 
 from event_memory.lossless_hierarchy import (
-    BUFFER_CAPACITY, LosslessManager, LosslessStore, PlacementError, apply_placements, neighbor_index,
-    parse_writer_output, placement_input, project_v11_bundle, writer_event)
+    BUFFER_CAPACITY, LosslessManager, LosslessStore, PlacementError, apply_placements, assign_entity_ids,
+    neighbor_index, parse_writer_output, placement_input, project_v11_bundle, registry_view, same_step_label,
+    writer_event)
 from event_memory.merged_retrieval import validate_merged_memory
 from event_memory.text_retrieval import CaptionRetriever
 from event_memory.timed_caption import caption_blocks
 
 
 def writer_json(caption='A man places a red cup on the kitchen counter.', summary='A man places a red cup on the kitchen counter.',
-                changes=None, keywords=None):
+                changes=None, keywords=None, entities=None):
     return json.dumps({'caption': caption, 'summary': summary,
-                       'changes': changes if changes is not None else [{'object': 'red cup', 'change': 'placed', 'result': 'on the kitchen counter'}],
+                       'entities': entities if entities is not None else [
+                           {'ref': 'N1', 'kind': 'object', 'label': 'red cup', 'appearance': 'red ceramic cup'}],
+                       'changes': changes if changes is not None else [
+                           {'object': 'red cup', 'ref': 'N1', 'change': 'placed', 'result': 'on the kitchen counter'}],
                        'keywords': keywords if keywords is not None else ['red cup', 'kitchen counter']})
 
 
@@ -55,21 +59,25 @@ class LosslessTests(unittest.TestCase):
             self.frames[f'f{i:06d}'] = {'id': f'f{i:06d}', 'time': float(i), 'path': str(p),
                                         'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
 
-    def event(self, store, i, caption=None, summary=None, keywords=None, changes=None):
+    def event(self, store, i, caption=None, summary=None, keywords=None, changes=None, entities=None):
         frames = [self.frames[f'f{i:06d}']]
-        body, s, c, k = parse_writer_output(writer_json(caption or f'Observation {i}.', summary or f'Event {i} summary.',
-                                                        changes, keywords))
-        e = writer_event(f"E{store.snapshot()['next_event_id']}", body, s, c, k, frames)
-        store.add_event(e, frames, float(i))
+        state = store.snapshot()
+        body, s, ents, c, k, _ = parse_writer_output(
+            writer_json(caption or f'Observation {i}.', summary or f'Event {i} summary.', changes, keywords, entities),
+            state['entities'])
+        ents, c, new = assign_entity_ids(state, ents, c)
+        e = writer_event(f"E{state['next_event_id']}", body, s, c, k, frames, ents)
+        store.add_event(e, frames, float(i), new)
         return e['id']
 
     # writer -------------------------------------------------------------
     def test_writer_parser_validates_fields_and_rejects_time_headers(self):
-        body, summary, changes, keywords = parse_writer_output(
+        body, summary, entities, changes, keywords, _ = parse_writer_output(
             '```json\n' + writer_json('Line one.\nLine two.', keywords=['Red Cup', 'red cup', 'counter']) + '\n```')
         self.assertEqual(body, 'Line one.\nLine two.')
         self.assertEqual(keywords, ['red cup', 'counter'])
         self.assertEqual(changes[0]['result'], 'on the kitchen counter')
+        self.assertEqual(entities[0]['label'], 'red cup')
         for bad in [json.dumps({'caption': 'x'}),
                     writer_json('<3s - 4s>\nA cup.'),
                     writer_json(keywords=[]),
@@ -79,9 +87,85 @@ class LosslessTests(unittest.TestCase):
                 parse_writer_output(bad)
 
     def test_writer_event_owns_the_time_header(self):
-        e = writer_event('E1', 'A cup.', 's', [], ['cup'], [self.frames['f000003'], self.frames['f000005']])
+        e = writer_event('E1', 'A cup.', 's', [], ['cup'], [self.frames['f000003'], self.frames['f000005']], [])
         self.assertEqual(e['caption'].splitlines()[0], '<3s - 5s>')
         self.assertEqual((e['start'], e['end']), (3.0, 5.0))
+
+    def test_entity_registry_assigns_and_reuses_ids(self):
+        store = LosslessStore()
+        self.event(store, 1, entities=[
+            {'ref': 'N1', 'kind': 'person', 'label': 'man in black t-shirt', 'appearance': 'man, short hair, black t-shirt'},
+            {'ref': 'N2', 'kind': 'object', 'label': 'horse painting', 'appearance': 'framed painting of a brown horse'}],
+            changes=[{'object': 'horse painting', 'ref': 'N2', 'change': 'hung', 'result': 'on the wall'}])
+        state = store.snapshot()
+        self.assertEqual(sorted(state['entities']), ['H1', 'O2'])
+        self.assertEqual(state['events']['E1']['changes'][0]['ref'], 'O2')
+        self.assertEqual(registry_view(state)[0]['ref'], 'H1')
+        # second event reuses O2 and introduces nothing new
+        self.event(store, 2, entities=[{'ref': 'O2', 'appearance': 'framed horse painting above the sofa'}],
+                   changes=[{'object': 'horse painting', 'ref': 'O2', 'change': 'straightened', 'result': 'level'}])
+        state = store.snapshot()
+        self.assertEqual(state['next_entity_id'], 3)
+        self.assertEqual(state['entities']['O2']['event_ids'], ['E1', 'E2'])
+        self.assertEqual(state['entities']['O2']['last_seen'], 2.0)
+        self.assertEqual(state['entities']['O2']['appearance'], 'framed horse painting above the sofa')
+        self.assertEqual(state['entities']['H1']['event_ids'], ['E1'])
+        # unknown registry IDs, bad kinds and dangling change refs are rejected
+        for ents, changes in [([{'ref': 'O9', 'appearance': 'x'}], []),
+                              ([{'ref': 'N1', 'kind': 'animal', 'label': 'dog', 'appearance': 'x'}], []),
+                              ([{'ref': 'N1', 'appearance': 'x'}], []),
+                              ([], [{'object': 'cup', 'ref': 'N1', 'change': 'moved', 'result': 'left'}])]:
+            with self.assertRaises(ValueError):
+                parse_writer_output(writer_json(entities=ents, changes=changes), state['entities'])
+
+    def test_camera_lines_and_changes_are_filtered(self):
+        raw = writer_json('The camera pans right across the room.\nTwo white bar stools stand at the kitchen counter.',
+                          changes=[{'object': 'camera', 'ref': '', 'change': 'pans', 'result': 'to the counter'},
+                                   {'object': 'red cup', 'ref': 'N1', 'change': 'placed', 'result': 'on the counter'}])
+        body, _, _, changes, _, filtered = parse_writer_output(raw)
+        self.assertEqual(body, 'Two white bar stools stand at the kitchen counter.')
+        self.assertEqual([c['object'] for c in changes], ['red cup'])
+        self.assertEqual(filtered, {'camera_lines': 1, 'camera_changes': 1})
+        # actions seen through camera words are kept
+        body, *_ = parse_writer_output(writer_json('A man picks up the cup as the camera zooms in.'))
+        self.assertIn('picks up', body)
+        with self.assertRaises(ValueError):
+            parse_writer_output(writer_json('The camera pans left.\nThe view zooms in.'))
+
+    def test_same_step_label_ignores_tools_and_articles(self):
+        self.assertTrue(same_step_label('stir the pot with chopsticks', 'stir the pot with a spoon'))
+        self.assertTrue(same_step_label('stirs the pot', 'stir pot'))
+        self.assertTrue(same_step_label('add rice', 'add rice to the pan'))
+        self.assertFalse(same_step_label('add rice', 'add ham'))
+        self.assertFalse(same_step_label('stir the pot', 'pour the pot'))
+
+    def test_step_guards_reject_duplicates_and_static_frames(self):
+        store = LosslessStore()
+        self.event(store, 1)
+        self.event(store, 2)
+        self.event(store, 3, changes=[])
+        state = store.snapshot()
+        first = [place('E1', 'new', 'new', 'stove', 'cooking', 'new', 'stir the pot with chopsticks')]
+        with self.assertRaises(PlacementError):   # same verb + target as the previous step
+            apply_placements(state, {'placements': first + [
+                place('E2', step='new', step_label='stir the pot with a spoon'), place('E3')]}, 3.0)
+        with self.assertRaises(PlacementError):   # static single frame cannot open a step
+            apply_placements(state, {'placements': first + [
+                place('E2', step='current'), place('E3', step='new', step_label='rest')]}, 3.0)
+        s = apply_placements(state, {'placements': first + [place('E2', step='current'), place('E3', step='current')]}, 3.0)
+        self.assertEqual(s['steps']['S1']['event_ids'], ['E1', 'E2', 'E3'])
+
+    def test_placement_input_lists_entities_and_visible_action(self):
+        store = LosslessStore()
+        self.event(store, 1)
+        self.event(store, 2, entities=[], changes=[])
+        payload, _ = placement_input(store.snapshot(), 2.0)
+        pending = {p['id']: p for p in payload['pending_events']}
+        first, second = pending['E1'], pending['E2']
+        self.assertEqual(first['entities'], ['O1 red cup'])
+        self.assertTrue(first['has_visible_action'])
+        self.assertEqual(second['entities'], [])
+        self.assertFalse(second['has_visible_action'])
 
     # placement ----------------------------------------------------------
     def test_place_new_phase_steps_and_close_previous(self):
@@ -169,9 +253,22 @@ class LosslessTests(unittest.TestCase):
                  'A white cabinet holds plates.']
         for i, t in enumerate(texts, 1):
             self.event(store, i, caption=t, summary=t, keywords=['cookbook', 'counter'] if i == 3 else ['room'],
-                       changes=[])
+                       changes=[], entities=[])
             manager.maybe_review(store, float(i))
         return manager.finalize_snapshot(store, 5.0)
+
+    def test_projection_shows_entities_and_changes(self):
+        store = LosslessStore()
+        backend = ScriptedBackend([[place('E1', 'new', 'new', 'kitchen', 'cooking', 'new', 'place the cup')]])
+        manager = LosslessManager(backend)
+        self.event(store, 1)
+        manager.maybe_review(store, 1.0, force=True)
+        bundle = project_v11_bundle(manager.finalize_snapshot(store, 1.0), 'demo')
+        validate_merged_memory(bundle, 1.0)
+        caption = next(iter(bundle['store']['events'].values()))['caption']
+        self.assertIn('Entity O1 (red cup): red ceramic cup', caption)
+        self.assertIn('Change [O1]: red cup placed -> on the kitchen counter', caption)
+        self.assertIn('Step: place the cup', caption)
 
     def test_projection_passes_v11_validators_and_keeps_every_line(self):
         state = self.build_two_phase_state()

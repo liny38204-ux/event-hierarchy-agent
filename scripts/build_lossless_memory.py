@@ -26,11 +26,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'src'), str(ROOT / 'scripts')]
 
-from event_memory.caption_runtime import CaptionTruncated, QwenCaptionWriter, sha256_file
+from event_memory.caption_runtime import QwenCaptionWriter, sha256_file
+try:  # newer runtimes raise a dedicated type; older ones a plain ValueError
+    from event_memory.caption_runtime import CaptionTruncated
+except ImportError:  # pragma: no cover - depends on deployed runtime
+    class CaptionTruncated(ValueError):
+        pass
 from event_memory.image_filter import VAMImageFilterConfig
 from event_memory.lossless_hierarchy import (
-    BUFFER_CAPACITY, POLICY, SCHEMA, SCHEMA_VERSION, WRITER, WRITER_REPAIR,
-    LosslessManager, LosslessStore, ReviewFailure, parse_writer_output, project_v11_bundle, writer_event)
+    BUFFER_CAPACITY, POLICY, SCHEMA, SCHEMA_REVISION, SCHEMA_VERSION, WRITER, WRITER_REPAIR,
+    LosslessManager, LosslessStore, ReviewFailure, assign_entity_ids, parse_writer_output, project_v11_bundle,
+    registry_view, writer_event)
 from event_memory.retained_frontend import candidate_batches
 
 FPS = 1.0
@@ -58,22 +64,36 @@ class WriteFailure(RuntimeError):
         self.diagnostic = {'stage': 'write', 'segment': sid, 'attempt_errors': errors}
 
 
-def write_segment(writer, segment, event_id):
-    """One writer call (+ up to two repairs). Returns a validated immutable E."""
+def write_segment(writer, segment, event_id, state):
+    """One writer call (+ up to two repairs).
+
+    Returns (event, new_entity_records, attempts, filtered). The writer sees the
+    current entity registry so it can reuse IDs; it never sees other captions.
+    """
+    registry = {e['id']: e for e in state['entities'].values()}
+    view = registry_view(state)
     base = (f"Observed segment {segment['id']}: {len(segment['evidence'])} retained frames in chronological order. "
-            'Describe only what they show.')
+            'Describe only what they show.\n'
+            + ('Entity registry (earlier in this video, most recent first): ' + json.dumps(view, ensure_ascii=False)
+               if view else 'Entity registry: empty (nothing recorded yet).'))
     text, errors = base, []
     for attempt in range(3):
         try:
             raw = writer.generate(WRITER, text, segment['evidence'], stage=f"write:{segment['id']}:{attempt}")
-            body, summary, changes, keywords = parse_writer_output(raw)
-            return writer_event(event_id, body, summary, changes, keywords, segment['evidence']), attempt + 1
+            body, summary, entities, changes, keywords, filtered = parse_writer_output(raw, registry)
+            entities, changes, new = assign_entity_ids(state, entities, changes)
+            event = writer_event(event_id, body, summary, changes, keywords, segment['evidence'], entities)
+            return event, new, attempt + 1, filtered
         except CaptionTruncated:
             errors.append('output_truncated')
             text = base + '\n' + WRITER_REPAIR + 'output was too long; describe repeated static details once.'
         except ValueError as exc:
-            errors.append(str(exc)[:200])
-            text = base + '\n' + WRITER_REPAIR + str(exc)[:300]
+            if 'truncated' in str(exc).lower():
+                errors.append('output_truncated')
+                text = base + '\n' + WRITER_REPAIR + 'output was too long; describe repeated static details once.'
+            else:
+                errors.append(str(exc)[:200])
+                text = base + '\n' + WRITER_REPAIR + str(exc)[:300]
         if not writer.fits(WRITER, text, segment['evidence']):
             text = base
     raise WriteFailure(segment['id'], errors)
@@ -125,7 +145,8 @@ def build(video_path, frontier, output, video_id, backend, encoder):
                                     frontier, audit=boundary_audit,
                                     fits=lambda images: writer.fits(WRITER, FIT_PROBE, images))
         store, manager = LosslessStore(), LosslessManager(backend)
-        stats = {'segments': 0, 'writer_repairs': 0, 'reviews': 0, 'place_retries': 0}
+        stats = {'segments': 0, 'writer_repairs': 0, 'reviews': 0, 'place_retries': 0,
+                 'camera_lines_dropped': 0, 'camera_changes_dropped': 0, 'entities_reused': 0}
 
         def review(now, force=False):
             result = manager.maybe_review(store, now, force=force)
@@ -140,10 +161,14 @@ def build(video_path, frontier, output, video_id, backend, encoder):
                 review(store.snapshot()['observed_until'], force=True)
             segment = {'id': sid, 'start': candidate['start'], 'end': candidate['end'],
                        'evidence': [{**e, 'sha256': frames[e['id']]['sha256']} for e in candidate['evidence']]}
-            event, attempts = write_segment(writer, segment, f"E{store.snapshot()['next_event_id']}")
+            event, new_entities, attempts, filtered = write_segment(
+                writer, segment, f"E{store.snapshot()['next_event_id']}", store.snapshot())
             stats['segments'] += 1
             stats['writer_repairs'] += attempts - 1
-            store.add_event(event, [frames[e['id']] for e in candidate['evidence']], now)
+            stats['camera_lines_dropped'] += filtered['camera_lines']
+            stats['camera_changes_dropped'] += filtered['camera_changes']
+            stats['entities_reused'] += len(event['entities']) - len(new_entities)
+            store.add_event(event, [frames[e['id']] for e in candidate['evidence']], now, new_entities)
             review(now)
         if frontier > store.snapshot()['observed_until']:
             store.advance(frontier)
@@ -152,7 +177,8 @@ def build(video_path, frontier, output, video_id, backend, encoder):
         if set(f for e in final_state['events'].values() for f in e['frame_ids']) != set(frames):
             raise RuntimeError('frame coverage incomplete')
         v12_path = build_dir / 'v12' / video_id / 'memory_v12.json'
-        _save(v12_path, {'schema': SCHEMA, 'schema_version': SCHEMA_VERSION, 'video_id': video_id,
+        _save(v12_path, {'schema': SCHEMA, 'schema_version': SCHEMA_VERSION, 'schema_revision': SCHEMA_REVISION,
+                         'video_id': video_id,
                          'observed_until': frontier, 'status': 'complete', 'store': final_state,
                          'manager_calls': manager.calls})
         projection = project_v11_bundle(final_state, video_id, provenance={'v12_memory': str(v12_path)})
@@ -160,6 +186,7 @@ def build(video_path, frontier, output, video_id, backend, encoder):
         _save(build_dir / 'boundary_decisions.json', {'frontier': frontier, 'decisions': boundary_audit})
         metrics = {**stats, 'events': len(final_state['events']), 'steps': len(final_state['steps']),
                    'phases': len(final_state['phases']), 'episodes': len(final_state['episodes']),
+                   'entities': len(final_state['entities']),
                    'retained_frames': len(records), 'sampled_frames': len(audit),
                    'manager_calls': manager.calls, 'seconds': round(time.monotonic() - t0, 1)}
         status.update(status='complete', metrics=metrics, memory_v12=str(v12_path),

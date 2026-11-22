@@ -34,7 +34,8 @@ from .timed_caption import caption_blocks, render_blocks, time_header
 
 SCHEMA = 'lossless_step_memory_v12'
 SCHEMA_VERSION = 12
-POLICY = 'lossless_place_only_v1'
+SCHEMA_REVISION = 2          # r2: entity registry, camera-change filter, step merge guard
+POLICY = 'lossless_place_only_v2'
 BUFFER_CAPACITY = 5
 REVIEW_SECONDS = 30.0
 CONTEXT_LIMIT = 9000
@@ -53,10 +54,18 @@ STEP_LABEL_LIMIT = 80
 PHASE_SUMMARY_LIMIT = 240
 EPISODE_SUMMARY_LIMIT = 300
 
-E_KEYS = {'id', 'caption', 'summary', 'changes', 'keywords', 'frame_ids', 'start', 'end'}
+ENTITY_LIMIT = 10            # entities mentioned per event
+ENTITY_LABEL_LIMIT = 50
+ENTITY_APPEARANCE_LIMIT = 120
+REGISTRY_SHOWN = 20          # most recently seen entities shown to the writer
+ENTITY_KINDS = {'person': 'H', 'object': 'O'}
+
+E_KEYS = {'id', 'caption', 'summary', 'changes', 'keywords', 'entities', 'frame_ids', 'start', 'end'}
 CHANGE_KEYS = {'object', 'change', 'result'}
-STATE_KEYS = {'frames', 'events', 'steps', 'phases', 'episodes', 'roots', 'observed_until',
-              'next_event_id', 'next_step_id', 'next_phase_id', 'next_episode_id'}
+CHANGE_OPTIONAL = {'ref'}
+ENTITY_KEYS = {'id', 'kind', 'label', 'appearance', 'first_seen', 'last_seen', 'event_ids'}
+STATE_KEYS = {'frames', 'events', 'entities', 'steps', 'phases', 'episodes', 'roots', 'observed_until',
+              'next_event_id', 'next_entity_id', 'next_step_id', 'next_phase_id', 'next_episode_id'}
 STEP_KEYS = {'id', 'label', 'phase_id', 'event_ids', 'start', 'end'}
 NODE_KEYS = {'id', 'title', 'summary', 'status', 'start', 'end', 'closed_at'}
 
@@ -67,30 +76,41 @@ NODE_KEYS = {'id', 'title', 'summary', 'status', 'start', 'end', 'closed_at'}
 
 WRITER = '''You record one causal segment of a video stream as English memory for later question answering.
 The frames are shown in chronological order. Describe only what they show; the program assigns the observation window.
+The user message may include a registry of people and objects already recorded earlier in this video, each with an ID (H1 = person, O1 = object), a label and an appearance.
 
 Return exactly one JSON object:
-{"caption":"line one\\nline two","summary":"...","changes":[{"object":"...","change":"...","result":"..."}],"keywords":["..."]}
+{"caption":"line one\\nline two","summary":"...","entities":[{"ref":"O2","appearance":"..."},{"ref":"N1","kind":"person","label":"...","appearance":"..."}],"changes":[{"object":"...","ref":"O2","change":"...","result":"..."}],"keywords":["..."]}
 
 caption: chronological English sentences, one observation per line, separated by \\n.
 - Make people, objects and places the subjects. Record each meaningful action or state change in order, and write repetitions as separate lines (a hand puts down one card, arranges cards, then puts down another).
-- Locate objects by physical relations: what holds it, what it rests on, what it is next to, which room or fixture. Use left/right only relative to a person or a named object. Omit screen positions and camera commentary (panning, zooming, entering the frame); when a new view reveals an object, say what became visible and where it is.
+- Locate objects by physical relations: what holds it, what it rests on, what it is next to, which room or fixture. Use left/right only relative to a person or a named object.
+- Never describe the camera or the view. Do not write "the camera pans", "the view shifts", "zooms", "comes into view", "the frame shows". Write what is there instead: not "The camera pans right, revealing a counter with stools" but "Two white bar stools stand at the kitchen counter." Do not repeat a scene detail that an earlier line in this caption already states.
 - Copy legible text exactly in quotes. Give counts when they are visible.
 - Name an object only when its identity is visually clear. When its shape is broken, blurred, partly occluded or looks like a reconstruction artifact, describe visible features instead ("an irregular pale object on the side table"), never a guessed identity.
 - Do not invent movement, identity, intention, cause, speech or text. A single pose does not prove a movement. Do not claim persistence through gaps.
-- Mention the same unchanged scene detail once. Prefer at most 150 words.
+- Prefer at most 150 words.
 
 summary: one self-contained English sentence (at most 40 words) naming where this happens, the main person or object, and the concrete activity or viewing focus, with the key result. Another program groups events using only this summary, so be specific (use "slices onions on a wooden board", not "cooking activity").
 
-changes: visible state changes only, in order. object = the thing that changed; change = verb phrase (picked up, placed, opened, poured into, turned on, appeared, removed); result = its resulting location or state. At most 8. Use [] for a static segment.
+entities: the people and distinctive objects that matter in this segment (at most 10): people who act or interact, objects that are handled, changed, or are distinctive fixtures (a painting, a cutting board, a bag). Skip generic walls, floors and lighting.
+- If one matches a registry entry (same person or same object instance, by appearance and place), reuse its ref: {"ref":"O2","appearance":"what is visible of it now"}. Reuse is a claim of identity: do it only when the frames support it.
+- If it is new, number it within this segment: {"ref":"N1","kind":"person","label":"man in black t-shirt","appearance":"black t-shirt, tattoos on both arms, seated at the table"}. kind is "person" or "object"; label is a short noun phrase; appearance gives visible color, material, clothing, markings and location.
+- If you cannot tell whether it is the same instance as a registry entry, make it new and write "possibly H1" in its appearance.
+
+changes: visible state changes of people or objects only, in order. object = the thing that changed; ref = its entity ref from entities ("H1", "O2", "N1") or "" if none; change = verb phrase (picked up, placed, opened, poured into, turned on, appeared, removed); result = its resulting location or state. Camera movement or a new viewpoint is not a change. At most 8. Use [] for a static segment.
 
 keywords: 3 to 12 lowercase English nouns or short noun phrases for retrieval: distinctive objects, fixtures, rooms, legible text. No verbs, no sentences.
 
 No other fields, no time headers, no markdown, no explanations.'''
 
-WRITER_REPAIR = ('Return only one JSON object with exactly the keys caption, summary, changes and keywords. '
+WRITER_REPAIR = ('Return only one JSON object with exactly the keys caption, summary, entities, changes and keywords. '
                  'Fix this validation error: ')
 
 _TIME_HEADER = re.compile(r'<\s*\d+(?:\.\d+)?\s*s\s*-\s*\d+(?:\.\d+)?\s*s\s*>')
+# Camera/viewpoint language: such "changes" describe the recording, not the world.
+_CAMERA = re.compile(r'\b(camera|the view|viewpoint|point of view|pans?|panning|panned|zoom(?:s|ed|ing)?|'
+                     r'tilts?|tilting|frame shows|in the frame|enters? the frame|leaves? the frame|'
+                     r'comes? into view|shot)\b', re.I)
 
 
 def _clean_text(value, field, limit=None):
@@ -102,29 +122,89 @@ def _clean_text(value, field, limit=None):
     return value
 
 
-def parse_writer_output(raw):
-    """Validate the writer JSON. Returns caption body, summary, changes and keywords."""
+def _is_camera_line(line):
+    """A caption line that only narrates camera/viewpoint movement."""
+    return bool(_CAMERA.search(line)) and not re.search(
+        r'\b(hand|hands|person|man|woman|he|she|they|holds?|places?|puts?|picks?|opens?|cuts?|pours?)\b',
+        line, re.I)
+
+
+def parse_writer_output(raw, registry=None):
+    """Validate the writer JSON.
+
+    Returns (caption_body, summary, entities, changes, keywords, filtered) where
+    entities is a list of {'ref', 'kind', 'label', 'appearance'} with ref either an
+    existing registry ID or a fresh "N<k>" placeholder, and filtered counts lines/
+    changes removed because they only describe the camera.
+    """
+    registry = registry or {}
     parsed, _ = parse_manager_json(raw)
-    if not isinstance(parsed, dict) or set(parsed) != {'caption', 'summary', 'changes', 'keywords'}:
-        raise ValueError('writer must return exactly caption, summary, changes and keywords')
+    if not isinstance(parsed, dict) or set(parsed) != {'caption', 'summary', 'entities', 'changes', 'keywords'}:
+        raise ValueError('writer must return exactly caption, summary, entities, changes and keywords')
     body = parsed['caption']
     if not isinstance(body, str) or not body.strip():
         raise ValueError('caption must be a nonempty string')
     if _TIME_HEADER.search(body):
         raise ValueError('caption must not contain time headers; the program adds them')
-    lines = [line.strip() for line in body.strip().splitlines() if line.strip()]
+    raw_lines = [line.strip() for line in body.strip().splitlines() if line.strip()]
+    lines = [line for line in raw_lines if not _is_camera_line(line)]
     if not lines:
-        raise ValueError('caption needs at least one observation line')
+        raise ValueError('caption needs at least one observation of people, objects or places, not only camera movement')
+    filtered = {'camera_lines': len(raw_lines) - len(lines), 'camera_changes': 0}
     summary = _clean_text(parsed['summary'], 'summary', SUMMARY_LIMIT)
+
+    entities = parsed['entities']
+    if not isinstance(entities, list) or len(entities) > ENTITY_LIMIT:
+        raise ValueError(f'entities must be a list of at most {ENTITY_LIMIT} items')
+    clean_entities, refs = [], set()
+    for index, item in enumerate(entities):
+        if not isinstance(item, dict) or 'ref' not in item or 'appearance' not in item:
+            raise ValueError(f'entities[{index}] needs ref and appearance')
+        ref = item['ref']
+        if not isinstance(ref, str):
+            raise ValueError(f'entities[{index}].ref must be a string')
+        appearance = _clean_text(item['appearance'], f'entities[{index}].appearance', ENTITY_APPEARANCE_LIMIT)
+        if re.fullmatch(r'[HO][1-9][0-9]*', ref):
+            if ref not in registry:
+                raise ValueError(f'entities[{index}].ref {ref} is not in the registry; use a new N ref')
+            if set(item) - {'ref', 'appearance', 'kind', 'label'}:
+                raise ValueError(f'entities[{index}] has unknown fields')
+            entry = {'ref': ref, 'kind': registry[ref]['kind'], 'label': registry[ref]['label'],
+                     'appearance': appearance}
+        elif re.fullmatch(r'N[1-9][0-9]*', ref):
+            if set(item) != {'ref', 'kind', 'label', 'appearance'}:
+                raise ValueError(f'entities[{index}] new entity needs exactly ref, kind, label and appearance')
+            if item['kind'] not in ENTITY_KINDS:
+                raise ValueError(f'entities[{index}].kind must be person or object')
+            entry = {'ref': ref, 'kind': item['kind'],
+                     'label': _clean_text(item['label'], f'entities[{index}].label', ENTITY_LABEL_LIMIT).lower(),
+                     'appearance': appearance}
+        else:
+            raise ValueError(f'entities[{index}].ref must be a registry ID (H1, O2) or a new N ref (N1)')
+        if ref in refs:
+            raise ValueError(f'entities[{index}].ref {ref} repeated')
+        refs.add(ref)
+        clean_entities.append(entry)
+
     changes = parsed['changes']
     if not isinstance(changes, list) or len(changes) > CHANGE_LIMIT:
         raise ValueError(f'changes must be a list of at most {CHANGE_LIMIT} items')
     clean_changes = []
     for index, item in enumerate(changes):
-        if not isinstance(item, dict) or set(item) != CHANGE_KEYS:
-            raise ValueError(f'changes[{index}] needs exactly object, change and result')
-        clean_changes.append({k: _clean_text(item[k], f'changes[{index}].{k}', CHANGE_FIELD_LIMIT)
-                              for k in ('object', 'change', 'result')})
+        if not isinstance(item, dict) or not CHANGE_KEYS <= set(item) or set(item) - (CHANGE_KEYS | CHANGE_OPTIONAL):
+            raise ValueError(f'changes[{index}] needs object, change, result and optional ref')
+        change = {k: _clean_text(item[k], f'changes[{index}].{k}', CHANGE_FIELD_LIMIT)
+                  for k in ('object', 'change', 'result')}
+        ref = item.get('ref', '') or ''
+        if not isinstance(ref, str) or (ref and ref not in refs):
+            raise ValueError(f'changes[{index}].ref must be "" or a ref listed in entities')
+        if _CAMERA.search(change['object']) or _CAMERA.search(change['change']):
+            filtered['camera_changes'] += 1
+            continue
+        if ref:
+            change['ref'] = ref
+        clean_changes.append(change)
+
     keywords = parsed['keywords']
     if not isinstance(keywords, list) or not 1 <= len(keywords) <= KEYWORD_LIMIT:
         raise ValueError(f'keywords must be a list of 1 to {KEYWORD_LIMIT} short strings')
@@ -133,19 +213,47 @@ def parse_writer_output(raw):
         word = _clean_text(word, f'keywords[{index}]', KEYWORD_CHARS).lower()
         if word not in clean_keywords:
             clean_keywords.append(word)
-    return '\n'.join(lines), summary, clean_changes, clean_keywords
+    return '\n'.join(lines), summary, clean_entities, clean_changes, clean_keywords, filtered
 
 
-def writer_event(event_id, body, summary, changes, keywords, evidence):
-    """Attach the program-owned observation window to a validated writer record."""
+def writer_event(event_id, body, summary, changes, keywords, evidence, entities=()):
+    """Attach the program-owned observation window to a validated writer record.
+
+    `entities` must already carry registry IDs (see `register_entities`).
+    """
     times = [finite(frame['time']) for frame in evidence]
     if not times or times != sorted(times):
         raise ValueError('writer evidence must be nonempty and chronological')
     caption = time_header(times[0], times[-1]) + '\n' + body
     caption_blocks(caption)
-    return {'id': event_id, 'caption': caption, 'summary': summary, 'changes': changes,
-            'keywords': keywords, 'frame_ids': [frame['id'] for frame in evidence],
+    return {'id': event_id, 'caption': caption, 'summary': summary,
+            'entities': [{'id': e['id'], 'appearance': e['appearance']} for e in entities],
+            'changes': changes, 'keywords': keywords, 'frame_ids': [frame['id'] for frame in evidence],
             'start': times[0], 'end': times[-1]}
+
+
+def registry_view(state, limit=REGISTRY_SHOWN):
+    """Most recently seen entities, newest first, for the writer prompt."""
+    items = sorted(state['entities'].values(), key=lambda e: (-e['last_seen'], e['id']))[:limit]
+    return [{'ref': e['id'], 'kind': e['kind'], 'label': e['label'], 'appearance': e['appearance'],
+             'last_seen': e['last_seen']} for e in items]
+
+
+def assign_entity_ids(state, parsed_entities, changes):
+    """Map writer refs ("N1") to fresh registry IDs. Returns (entities, changes, new_records)."""
+    counter = state['next_entity_id']
+    mapping, out, new = {}, [], []
+    for e in parsed_entities:
+        if e['ref'].startswith('N'):
+            eid = f"{ENTITY_KINDS[e['kind']]}{counter}"
+            counter += 1
+            new.append({'id': eid, 'kind': e['kind'], 'label': e['label'], 'appearance': e['appearance']})
+        else:
+            eid = e['ref']
+        mapping[e['ref']] = eid
+        out.append({**e, 'id': eid})
+    mapped_changes = [{**c, 'ref': mapping[c['ref']]} if 'ref' in c else c for c in changes]
+    return out, mapped_changes, new
 
 
 # --------------------------------------------------------------------------
@@ -153,8 +261,8 @@ def writer_event(event_id, body, summary, changes, keywords, evidence):
 # --------------------------------------------------------------------------
 
 def _new_state():
-    return {'frames': {}, 'events': {}, 'steps': {}, 'phases': {}, 'episodes': {}, 'roots': [],
-            'observed_until': 0.0, 'next_event_id': 1, 'next_step_id': 1,
+    return {'frames': {}, 'events': {}, 'entities': {}, 'steps': {}, 'phases': {}, 'episodes': {}, 'roots': [],
+            'observed_until': 0.0, 'next_event_id': 1, 'next_entity_id': 1, 'next_step_id': 1,
             'next_phase_id': 1, 'next_episode_id': 1}
 
 
@@ -177,7 +285,7 @@ class LosslessStore:
         if set(s) != STATE_KEYS:
             raise ValueError('v12 state has unknown or missing fields')
         now = finite(s['observed_until'])
-        for counter in ('next_event_id', 'next_step_id', 'next_phase_id', 'next_episode_id'):
+        for counter in ('next_event_id', 'next_entity_id', 'next_step_id', 'next_phase_id', 'next_episode_id'):
             if type(s[counter]) is not int or s[counter] < 1:
                 raise ValueError('invalid id counter')
         for fid, f in s['frames'].items():
@@ -205,8 +313,37 @@ class LosslessStore:
             times = [s['frames'][f]['time'] for f in fs]
             if (finite(e['start']), finite(e['end'])) != (min(times), max(times)):
                 raise ValueError('event bounds must equal its frame envelope')
+            seen_refs = set()
+            for item in e['entities']:
+                if set(item) != {'id', 'appearance'} or item['id'] not in s['entities'] or item['id'] in seen_refs:
+                    raise ValueError('event entity must reference the registry once')
+                seen_refs.add(item['id'])
+                text(item['appearance'], ENTITY_APPEARANCE_LIMIT)
+            for change in e['changes']:
+                if not CHANGE_KEYS <= set(change) or set(change) - (CHANGE_KEYS | CHANGE_OPTIONAL):
+                    raise ValueError('invalid change record')
+                if 'ref' in change and change['ref'] not in seen_refs:
+                    raise ValueError('change ref must be an entity of the same event')
         if set(owner) != set(s['frames']):
             raise ValueError('every frame must belong to an event')
+        mentions = {}
+        for eid, e in s['events'].items():
+            for item in e['entities']:
+                mentions.setdefault(item['id'], []).append(eid)
+        for nid, n in s['entities'].items():
+            if set(n) != ENTITY_KEYS or n['id'] != nid or n['kind'] not in ENTITY_KINDS \
+                    or not re.fullmatch(ENTITY_KINDS[n['kind']] + r'[1-9][0-9]*', nid):
+                raise ValueError('invalid entity record')
+            if int(nid[1:]) >= s['next_entity_id']:
+                raise ValueError('entity id counter must exceed existing ids')
+            text(n['label'], ENTITY_LABEL_LIMIT)
+            text(n['appearance'], ENTITY_APPEARANCE_LIMIT)
+            order = sorted(mentions.get(nid, []), key=lambda x: (s['events'][x]['start'], int(x[1:])))
+            if not order or n['event_ids'] != order:
+                raise ValueError('entity event list must equal its chronological mentions')
+            if (finite(n['first_seen']), finite(n['last_seen'])) != (
+                    s['events'][order[0]]['start'], max(s['events'][x]['end'] for x in order)):
+                raise ValueError('entity first/last seen must match its events')
         # phases / episodes
         phase_members, step_members = {}, {}
         for pid, p in s['phases'].items():
@@ -286,7 +423,8 @@ class LosslessStore:
         if len(s['roots']) > BUFFER_CAPACITY:
             raise ValueError('working buffer exceeds capacity; review before another arrival')
 
-    def add_event(self, event, frames, now):
+    def add_event(self, event, frames, now, new_entities=()):
+        """Append one immutable E and register its new entities (from `assign_entity_ids`)."""
         s = self.snapshot()
         now = finite(now)
         if now < s['observed_until']:
@@ -297,6 +435,23 @@ class LosslessStore:
             if frame['id'] in s['frames'] and s['frames'][frame['id']] != frame:
                 raise ValueError('immutable frame changed')
             s['frames'][frame['id']] = deepcopy(frame)
+        expected = s['next_entity_id']
+        for record in new_entities:
+            if int(record['id'][1:]) != expected or record['id'] in s['entities']:
+                raise ValueError('new entity ids must continue the registry counter')
+            s['entities'][record['id']] = {**record, 'first_seen': event['start'], 'last_seen': event['end'],
+                                           'event_ids': []}
+            expected += 1
+        s['next_entity_id'] = expected
+        for item in event['entities']:
+            n = s['entities'].get(item['id'])
+            if n is None:
+                raise ValueError(f"event references unknown entity {item['id']}")
+            n['event_ids'] = sorted(n['event_ids'] + [event['id']],
+                                    key=lambda x: (event['start'] if x == event['id'] else s['events'][x]['start'], int(x[1:])))
+            n['first_seen'] = min(n['first_seen'], event['start'])
+            n['last_seen'] = max(n['last_seen'], event['end'])
+            n['appearance'] = item['appearance']      # latest visible description
         s['events'][event['id']] = deepcopy(event)
         s['next_event_id'] += 1
         s['roots'] = sorted(s['roots'] + [event['id']], key=lambda e: (s['events'][e]['start'], int(e[1:])))
@@ -341,7 +496,7 @@ def neighbor_index(state):
 # manager: placement only
 # --------------------------------------------------------------------------
 
-PLACER = '''You organize a streaming video memory. Each event E is an immutable record of one short observed segment; you see its English summary and a few anchor frames. You never rewrite captions.
+PLACER = '''You organize a streaming video memory. Each event E is an immutable record of one short observed segment; you see its English summary, its visible state changes, the people/objects it mentions (registry IDs such as H1, O3) and a few anchor frames. You never rewrite captions.
 
 Hierarchy:
 - P (episode): a broad observed activity or visit (cooking a dish, touring a home).
@@ -353,8 +508,14 @@ For each pending event choose:
 - phase: "current" (continue the open PH, only if it exists), or "new" (open a new PH; the previous PH closes).
 - episode: only for phase "new": "current" (same P) or "new" (a new broad activity begins).
 - step: "current" (same procedural step as the previous placed event in this PH), "new" (a new step starts), or "none" (no procedural step).
-Open a new PH when the concrete focus, area or sub-task really changes; viewpoint changes, short occlusions or repeated detail do not. Same room or same person alone does not prove the same PH. Do not stretch an old PH title to cover a different activity.
-Open a new step when the action unit changes (adding a different ingredient, switching from cutting to stirring). Repetitions of the same action unit stay in one step.
+
+Phase rules: open a new PH when the concrete focus, area or sub-task really changes; viewpoint changes, short occlusions or repeated detail do not. Same room or same person alone does not prove the same PH. Do not stretch an old PH title to cover a different activity. A short intro, title card or single static shot does not need its own PH when it fits the activity around it.
+
+Step rules:
+- A step is one action applied to one target: same verb and same object or ingredient = same step, even if the tool, hand or viewpoint changes. "stir the pot with chopsticks" and "stir the pot with a spoon" are ONE step "stir the pot". Repeating the action (another slice, another stir) stays in the step.
+- Start a new step only when the action or its target changes: cutting -> stirring, adding ham -> adding rice, washing the board -> wiping it dry.
+- An event that only shows a static scene, the result of the previous step, or the person between actions is not a step: use "current" if it continues the previous step, otherwise "none". Never create a step from an event with no visible action.
+- Label steps by the action and target only ("slice the meat"), without tool details or adjectives.
 
 Write titles only when you open nodes: phase_title (at most 8 words), episode_title (at most 8 words), step_label (verb phrase, at most 10 words). Leave them "" otherwise.
 
@@ -412,7 +573,9 @@ def placement_input(state, now):
                                                 if last_eid in state['steps'][sid]['event_ids']), None)}}
     pending = [{'id': e, 'start': state['events'][e]['start'], 'end': state['events'][e]['end'],
                 'summary': state['events'][e]['summary'],
-                'changes': state['events'][e]['changes']} for e in roots]
+                'entities': [f"{n['id']} {state['entities'][n['id']]['label']}" for n in state['events'][e]['entities']],
+                'changes': state['events'][e]['changes'],
+                'has_visible_action': bool(state['events'][e]['changes'])} for e in roots]
     evidence = _anchor_frames(state, shown_context + roots)
     payload = {'observed_until': now, 'current': context, 'pending_events': pending,
                'pending_event_ids': roots, 'visible_frame_ids': [f['id'] for f in evidence]}
@@ -490,6 +653,15 @@ def apply_placements(state, decision, now):
             st['start'], st['end'] = _span(s['events'], st['event_ids'])
         else:
             label = _clean_text(item['step_label'], f'placements[{index}].step_label', STEP_LABEL_LIMIT)
+            if not event['changes'] and len(event['frame_ids']) == 1:
+                raise PlacementError(f'placements[{index}]: {eid} is a single static frame with no visible change; '
+                                     'use step "current" to extend the previous step or "none"')
+            if phase['step_ids']:
+                prior = s['steps'][phase['step_ids'][-1]]
+                previous_event = phase['event_ids'][-2] if len(phase['event_ids']) > 1 else None
+                if previous_event in prior['event_ids'] and same_step_label(prior['label'], label):
+                    raise PlacementError(f'placements[{index}]: "{label}" repeats the previous step "{prior["label"]}" '
+                                         '(same action and target); use step "current"')
             sid = f"S{s['next_step_id']}"; s['next_step_id'] += 1
             s['steps'][sid] = {'id': sid, 'label': label, 'phase_id': phase['id'], 'event_ids': [eid],
                                'start': event['start'], 'end': event['end']}
@@ -504,6 +676,27 @@ def _title(value, field):
     if len(value.split()) > 12:
         raise PlacementError(f'{field} must be a short phrase')
     return value
+
+
+_STEP_STOP = {'the', 'a', 'an', 'with', 'using', 'by', 'in', 'into', 'on', 'onto', 'from', 'to', 'of', 'at',
+              'and', 'again', 'some', 'more', 'his', 'her', 'their', 'its', 'small', 'large', 'big'}
+_TOOLS = {'chopsticks', 'chopstick', 'spoon', 'spatula', 'knife', 'fork', 'hand', 'hands', 'fingers', 'whisk',
+          'ladle', 'tongs', 'brush', 'cloth', 'sponge', 'towel'}
+
+
+def _step_key(label):
+    words = [w for w in re.findall(r'[a-z]+', label.lower()) if w not in _STEP_STOP]
+    if not words:
+        return '', frozenset()
+    verb = words[0][:-1] if words[0].endswith('s') and len(words[0]) > 3 else words[0]
+    return verb, frozenset(w for w in words[1:] if w not in _TOOLS)
+
+
+def same_step_label(a, b):
+    """Same verb and same non-tool target words ("stir the pot" == "stir the pot with a spoon")."""
+    va, ta = _step_key(a)
+    vb, tb = _step_key(b)
+    return bool(va) and va == vb and (ta == tb or (ta and tb and (ta <= tb or tb <= ta)))
 
 
 class LosslessManager:
@@ -622,7 +815,8 @@ def _fallback_summary(state, phase):
 V11_SCHEMA = 'rolling_phase_memory_v11'
 
 
-def _event_block(event, steps_by_event):
+def _event_block(event, steps_by_event, registry=None):
+    registry = registry or {}
     blocks = caption_blocks(event['caption'])
     rendered = []
     for bounds, lines in blocks:
@@ -630,10 +824,14 @@ def _event_block(event, steps_by_event):
         step = steps_by_event.get(event['id'])
         if step is not None:
             extra.append(f'Step: {step}')
+        for item in event['entities']:
+            label = registry.get(item['id'], {}).get('label', '')
+            extra.append(f"Entity {item['id']} ({label}): {item['appearance']}")
         if event['keywords']:
             extra.append('Keywords: ' + ', '.join(event['keywords']))
         for change in event['changes']:
-            extra.append(f"Change: {change['object']} {change['change']} -> {change['result']}")
+            tag = f" [{change['ref']}]" if change.get('ref') else ''
+            extra.append(f"Change{tag}: {change['object']} {change['change']} -> {change['result']}")
         rendered.append((bounds, [*lines, *extra]))
         steps_by_event = {}  # annotate only the first block
     return rendered
@@ -658,7 +856,7 @@ def project_v11_bundle(state, video_id, *, provenance=None):
         blocks = []
         frame_ids = []
         for eid in phase['event_ids']:
-            blocks.extend(_event_block(s['events'][eid], steps_by_event))
+            blocks.extend(_event_block(s['events'][eid], steps_by_event, s['entities']))
             frame_ids.extend(s['events'][eid]['frame_ids'])
         merged = _merge_same_window(blocks)
         caption = render_blocks(merged)
