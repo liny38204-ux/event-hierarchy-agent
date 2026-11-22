@@ -13,6 +13,8 @@ import re
 import numpy as np
 from PIL import Image
 
+from .caption_style import CAPTION_STYLE_EN
+
 
 @dataclass(frozen=True)
 class FilterConfig:
@@ -156,12 +158,13 @@ class OnlineChangeDetector:
 
 
 CAPTION_SYSTEM = '''Describe the visible content of the NEW timestamped frames in chronological order.
-Return exactly JSON {"caption":"a factual caption"}; no entity/action/state field lists.
+Return exactly JSON {"caption":"factual line one\\nfactual line two"}; no entity/action/state field lists.
 Preserve observed actions, repetitions and changes. State uncertainty in ordinary prose.
 A pose in one image does not establish motion or duration. Do not invent unseen causes,
 intentions, identity, or activity in sampling gaps. The optional previous caption and
 bridge image are fallible context: do not count them again as a new occurrence.
-Caption only this batch's new observations. At most 180 words.'''
+Caption only this batch's new observations. At most 180 words.
+''' + CAPTION_STYLE_EN
 
 
 def parse_caption_response(raw):

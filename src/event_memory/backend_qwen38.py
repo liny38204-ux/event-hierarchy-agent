@@ -1,8 +1,32 @@
 """Frozen official Qwen3.8-27B, shared between independent writer/manager calls."""
+from contextlib import contextmanager
+from contextvars import ContextVar
+import gc
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import time
+
+
+# Writer outputs and manager inputs can contain superseded observations.
+# The live prefix builder only retains per-call metrics while consuming them.
+TRANSIENT_MEMORY_IO = ContextVar('transient_memory_io', default=False)
+
+
+@contextmanager
+def transient_memory_calls():
+    token = TRANSIENT_MEMORY_IO.set(True)
+    try:
+        yield
+    finally:
+        TRANSIENT_MEMORY_IO.reset(token)
+
+
+def memory_call_metrics(record):
+    return {k: v for k, v in record.items() if k in (
+        'stage', 'input_tokens', 'output_tokens', 'finish_reason', 'seconds',
+        'peak_allocated_bytes', 'image_grid_thw', 'max_pixels_per_image')}
 
 
 def json_ready(value):
@@ -14,11 +38,23 @@ def json_ready(value):
     raise TypeError('Unexpected receipt type: '+type(value).__name__)
 
 
+class FatalCudaError(BaseException):
+    """Prevent a poisoned CUDA context from entering JSON-repair loops."""
+
+
 class Qwen38Backend:
     def __init__(self, model_path, log_path, max_pixels=100352):
         import torch
         import transformers
         from transformers import AutoProcessor, Qwen3_5ForConditionalGeneration
+        from transformers.models.qwen3_5 import modeling_qwen3_5
+        from .bounded_delta_prefill import bounded_delta_rule
+        if not getattr(modeling_qwen3_5.torch_chunk_gated_delta_rule, "_epm_bounded", False):
+            bounded = bounded_delta_rule(modeling_qwen3_5.torch_chunk_gated_delta_rule, tile_size=512)
+            bounded._epm_bounded = True
+            modeling_qwen3_5.torch_chunk_gated_delta_rule = bounded
+        if importlib.util.find_spec('fla') is not None:
+            raise RuntimeError('This frozen bounded-torch runtime requires no FLA override')
         if torch.cuda.device_count()!=2:
             raise RuntimeError('Explicitly allocate exactly two idle GPUs for the 27B BF16 model')
         path=Path(model_path)
@@ -56,6 +92,7 @@ class Qwen38Backend:
             'verified_model_sha256':hashlib.sha256((path/'verified_model.json').read_bytes()).hexdigest(),
             'model_path':str(path),'torch':torch.__version__,'transformers':transformers.__version__,
             'dtype':'bfloat16','attention':'sdpa','patch_embed':'linear_same_weights',
+            'runtime_kernel':'torch_gdn_outer_tile512_inner64_v1',
             'enable_thinking':False,'do_sample':False,'seed':20261105,'max_pixels':max_pixels,
             'device_map':self.model.hf_device_map,'gpus':[torch.cuda.get_device_name(i) for i in range(2)],
             'trainable_parameters':sum(p.numel() for p in self.model.parameters() if p.requires_grad),
@@ -68,19 +105,31 @@ class Qwen38Backend:
         from PIL import Image
         content=[{'type':'text','text':text}]
         images=[]
+        pixel_cap = self.max_pixels
         for e in evidence:
             with Image.open(e['path']) as im:img=im.convert('RGB')
             images.append(img)
-            content += [{'type':'text','text':f"Frame {e['id']}, observed t={e['time']:.3f}s"},
+            if e.get('kind') == 'contact_sheet':
+                if len(evidence) != 1 or not 1 <= len(e['frame_ids']) <= 6:
+                    raise ValueError('expected a single contact sheet with one to six frames')
+                pixel_cap *= len(e['frame_ids'])
+                label = 'Contact sheet, chronological frame IDs: ' + ', '.join(e['frame_ids'])
+            else:
+                label = f"Frame {e['id']}, observed t={e['time']:.3f}s"
+            content += [{'type':'text','text':label},
                         {'type':'image','image':img}]
         messages=[{'role':'system','content':system},{'role':'user','content':content}]
         started=time.monotonic();record={'stage':stage,'system':system,'text':text,'evidence':list(evidence)}
+        inputs=output=ids=None
         try:
+            for i in range(2):self.torch.cuda.reset_peak_memory_stats(i)
             prompt=self.processor.apply_chat_template(messages,tokenize=False,
                 add_generation_prompt=True,enable_thinking=False)
             inputs=self.processor(text=[prompt],images=images or None,return_tensors='pt',
-                max_pixels=self.max_pixels,min_pixels=4096).to(self.input_device)
+                max_pixels=pixel_cap,min_pixels=4096).to(self.input_device)
             length=int(inputs['input_ids'].shape[-1])
+            record['max_pixels_per_image']=pixel_cap
+            record['input_tokens']=length
             if length+max_tokens>16384:raise ValueError('Context limit exceeded; no silent truncation')
             for i in range(2):self.torch.cuda.synchronize(i)
             with self.torch.inference_mode():
@@ -94,9 +143,23 @@ class Qwen38Backend:
                 image_grid_thw=inputs['image_grid_thw'].tolist() if 'image_grid_thw' in inputs else [])
             return raw
         except Exception as exc:
-            record['error']=repr(exc);raise
+            record['error']=repr(exc)
+            if any(marker in str(exc).lower() for marker in ('illegal memory access','device-side assert','cublas_status_execution_failed','cublas_status_internal_error')):
+                raise FatalCudaError(str(exc)) from exc
+            raise
         finally:
-            record['seconds']=time.monotonic()-started;self.calls.append(record)
+            # Drop generation tensors even after OOM before a caller retries.
+            inputs=output=ids=None
+            gc.collect()
+            try:
+                self.torch.cuda.empty_cache()
+                record['peak_allocated_bytes']=[self.torch.cuda.max_memory_allocated(i) for i in range(2)]
+            except Exception as cleanup_error:
+                record['cleanup_error']=repr(cleanup_error)
+            record['seconds']=time.monotonic()-started
+            if TRANSIENT_MEMORY_IO.get():
+                record=memory_call_metrics(record)
+            self.calls.append(record)
             self.log_path.parent.mkdir(parents=True,exist_ok=True)
             with self.log_path.open('a') as out:out.write(json.dumps(record,ensure_ascii=False)+'\n')
             print(json.dumps({k:record.get(k) for k in ('stage','seconds','input_tokens','output_tokens','error')}),flush=True)

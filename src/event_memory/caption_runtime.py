@@ -99,6 +99,10 @@ class LocalCLIPEncoder:
         return result.float().cpu().numpy()
 
 
+class CaptionTruncated(ValueError):
+    """No complete caption was returned within the model output budget."""
+
+
 class QwenCaptionWriter:
     """Use existing frozen Qwen backend; measure actual token input before calls."""
     def __init__(self, backend, context_limit=16384, output_tokens=1024):
@@ -125,5 +129,5 @@ class QwenCaptionWriter:
     def generate(self, system, text, evidence, *, stage):
         raw = self.backend.generate(system, text, evidence, stage=stage, max_tokens=self.output_tokens)
         if self.backend.calls[-1].get('finish_reason') != 'stop':
-            raise ValueError('Caption truncated; input coverage cannot be marked successful')
+            raise CaptionTruncated('Caption truncated; input coverage cannot be marked successful')
         return raw

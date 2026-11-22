@@ -1,0 +1,60 @@
+{
+  "repo_id": "Qwen/Qwen3-Embedding-0.6B",
+  "revision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+  "files": [
+    {
+      "name": "1_Pooling/config.json",
+      "size": 313,
+      "sha256": null,
+      "git_blob_sha1": "b6291baabbc39f9792d6759883a47d7d5bd0fbcf"
+    },
+    {
+      "name": "config.json",
+      "size": 727,
+      "sha256": null,
+      "git_blob_sha1": "cef2749ee93607b8f9a58ec72f4f6bfaf874e71d"
+    },
+    {
+      "name": "config_sentence_transformers.json",
+      "size": 215,
+      "sha256": null,
+      "git_blob_sha1": "76aef3ade63553ebb698fe3c2a3264040ed093f8"
+    },
+    {
+      "name": "merges.txt",
+      "size": 1671853,
+      "sha256": null,
+      "git_blob_sha1": "31349551d90c7606f325fe0f11bbb8bd5fa0d7c7"
+    },
+    {
+      "name": "model.safetensors",
+      "size": 1191586416,
+      "sha256": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd",
+      "git_blob_sha1": null
+    },
+    {
+      "name": "modules.json",
+      "size": 349,
+      "sha256": null,
+      "git_blob_sha1": "952a9b81c0bfd99800fabf352f69c7ccd46c5e43"
+    },
+    {
+      "name": "tokenizer.json",
+      "size": 11423705,
+      "sha256": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a",
+      "git_blob_sha1": null
+    },
+    {
+      "name": "tokenizer_config.json",
+      "size": 9706,
+      "sha256": null,
+      "git_blob_sha1": "7345216a0785dc7086e8c245b2a9d3896ce2b756"
+    },
+    {
+      "name": "vocab.json",
+      "size": 2776833,
+      "sha256": null,
+      "git_blob_sha1": "4783fe10ac3adce15ac8f358ef5462739852c569"
+    }
+  ]
+}

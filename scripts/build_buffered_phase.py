@@ -91,9 +91,31 @@ def build_video(video,frame_root,output,backend):
             collapsed=collapser.collapse_closed(store,step['now'])
             record(step,review,collapsed)
         now=video['steps'][-1]['now']
-        review=manager.maybe_review(store,now,force=True)
-        collapsed=collapser.collapse_closed(store,now)
-        record({'segment_id':'FINAL_REVIEW','now':now},review,collapsed)
+        # EOF may drain work which the bounded decision view has already
+        # accepted, but may not coerce a legitimate WAIT root into a phase.
+        # Continue only when a review actually consumes roots; record why any
+        # remaining tail is intentionally still unassigned.
+        finalization=[]
+        while True:
+            before=list(store.snapshot()['roots'])
+            review=manager.maybe_review(store,now,force=True)
+            collapsed=collapser.collapse_closed(store,now)
+            after=list(store.snapshot()['roots'])
+            assigned=list(review.get('assigned_event_ids', [])) if review.get('reviewed') else []
+            progress=len(after) < len(before)
+            if not after:
+                stop_reason='no_remaining_roots'
+            elif not progress:
+                stop_reason='model_deferred_remaining_roots'
+            else:
+                stop_reason='draining_visible_prefix'
+            finalization.append({'review_index':len(finalization)+1,'roots_before':before,
+                                 'assigned_event_ids':assigned,'remaining_root_ids':after,
+                                 'progress':progress,'stop_reason':stop_reason,
+                                 'organizer_reason':(review.get('decision') or {}).get('reason')})
+            record({'segment_id':f'FINAL_REVIEW_{len(finalization):04d}','now':now},review,collapsed)
+            if not after or not progress:
+                break
         s=store.snapshot()
         if set(s['frames'])!=set(frames):raise ValueError('input coverage incomplete')
         if {f for e in s['events'].values() for f in e['frame_ids']}!=set(frames):raise ValueError('event evidence lost')
@@ -102,7 +124,8 @@ def build_video(video,frame_root,output,backend):
         stats={'events':len(s['events']),'phases':len(s['phases']),'episodes':len(s['episodes']),
                'pending_events':len(s['roots']),'frames':len(s['frames']),'steps':len(video['steps']),
                'closed_phases':len(s['completed_phase_ids']),'actual_model_calls':len(backend.calls)-first,
-               'open_phases':sum(p['status']=='open' for p in s['phases'].values())}
+               'open_phases':sum(p['status']=='open' for p in s['phases'].values()),
+               'finalization':finalization}
         save(folder/'verification.json',stats)
         return stats
     except Exception:

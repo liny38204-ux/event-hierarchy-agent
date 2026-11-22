@@ -1,10 +1,21 @@
 """JSON and Markdown export for current direct-frame memory."""
 import json
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 
 def save(path, value):
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+    body = json.dumps(value, ensure_ascii=False, indent=2) + '\n'
+    tmp = NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent, delete=False)
+    temporary = Path(tmp.name)
+    try:
+        with tmp:
+            tmp.write(body)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def markdown(bundle):
@@ -12,7 +23,7 @@ def markdown(bundle):
         f"视频 {bundle['video_id']}，观察至 {s['observed_until']:.3f} 秒。", '']
     def event(eid):
         e = s['events'][eid]
-        lines.extend([f"#### {eid} · {e['start']:.3f}–{e['end']:.3f} 秒", '', e['caption'], '',
+        lines.extend([f"#### {eid} · {e['start']:.3f}–{e['end']:.3f} 秒", '', '  \n'.join(e['caption'].split('\n')), '',
                       '帧：' + '、'.join(f"[{f} @ {s['frames'][f]['time']:.3f}s](frames/{f}.jpg)" for f in e['frame_ids']), ''])
     for p in s['episodes'].values():
         lines.extend([f"## {p['id']} · {p['title']}", '', p['summary'], ''])

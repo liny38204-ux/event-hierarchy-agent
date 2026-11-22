@@ -29,6 +29,7 @@ def main():
         # requests are needed. Resume only our partial files; verify before use.
         def download(item):
             file=dest/item['name']
+            file.parent.mkdir(parents=True, exist_ok=True)
             if file.exists() and file.stat().st_size==item['size']:
                 print(json.dumps({'cached':item['name']}),flush=True);return
             partial=file.with_suffix(file.suffix+'.curl-part')

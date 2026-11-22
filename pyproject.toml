@@ -4,14 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "event-hierarchy-agent"
-version = "0.10.0"
-description = "Training-free buffered hierarchical memory for streaming video events"
+version = "0.11.0"
+description = "Training-free hierarchical memory and question answering for streaming video"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
 images = ["numpy>=2,<3", "Pillow>=10,<14", "opencv-python-headless>=4.10,<6", "scikit-image>=0.24,<0.27", "av>=16,<20"]
+retrieval = ["sentence-transformers>=5,<6"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

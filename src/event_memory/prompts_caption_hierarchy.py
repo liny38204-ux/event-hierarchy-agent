@@ -1,0 +1,52 @@
+"""Training-free caption writing and caption-based hierarchy management (v4)."""
+from .prompts_hierarchy import REPAIR
+from .caption_style import CAPTION_STYLE_EN
+
+WRITER = '''Describe the supplied causal video segment in ONE caption string.
+Include the main visible activity and relevant scene details. If several actions occur, preserve their observed order. A static segment still receives a caption of what is visible. Do not split subjects, objects, background, or text into separate records or labelled dimensions.
+Only describe supplied visual evidence. Do not invent movement, identity, intentions, text or causal explanations. A single pose does not prove a movement or transition. Mention ambiguity naturally in the caption; do not guess illegible text. Observations do not establish persistence through unseen gaps.
+Return exactly {"caption":"first factual sentence\\nsecond factual sentence"}. No additional fields, observation IDs, timestamps, action keys, markdown or explanations. Prefer at most 150 words. Frame IDs and times will be attached by the program.
+''' + CAPTION_STYLE_EN
+
+# The rolling v11 bridge is opt-in: legacy/buffered caption runs keep WRITER
+# byte-for-byte compatible with their frozen prompt.  Its time header is still
+# written by the bridge from the supplied evidence, never by this prompt.
+TIMED_WRITER = '''Describe the supplied causal video segment as one caption body.
+Make people, objects and places the subjects. Record meaningful actions and state changes in observed order, including separate repetitions (a hand puts down one card, arranges cards, then puts down another).
+Locate objects using visible landmarks and physical relationships: what holds an object, what it rests on, or what it is next to. Use left or right only with a clear physical reference such as a person's left hand. Omit screen coordinates ("on the right of the frame") and camera commentary (panning, zooming, entering or leaving the frame). When a change of view reveals a new object, state what became visible and where it is. Attribute movement to a person or object only when their own movement is visible.
+For a static scene, record distinctive objects with their visible state, placement or legible markings. For example, if the frames show an open case with a wrench inside, one line can say "A wrench lies inside an open case." An object can matter even when nobody touches it. Mention the same unchanged relation once per segment. When an item's identity or use is unclear, describe its visible features at the level the frames support.
+Only describe supplied visual evidence. Do not invent movement, identity, intentions, text or causal explanations. A single pose does not prove a movement or transition. Mention ambiguity naturally in the caption; do not guess illegible text. Observations do not establish persistence through unseen gaps.
+Return exactly {"caption":"first factual sentence\\nsecond factual sentence"}. No additional fields, observation IDs, timestamps, time headers, action keys, markdown or explanations. Prefer at most 150 words. The program, not you, attaches the displayed-frame observation window.
+''' + CAPTION_STYLE_EN
+
+MANAGER = '''Organize the video observed so far into a caption-based hierarchy.
+Each pending observation is ONE immutable caption of one candidate video segment, with its input-frame provenance. Read the caption as a whole; never turn its foreground, background or text details into separate events. The observations/observation_ids keys are caption references, not lists of semantic dimensions.
+An E node summarizes a local observed activity or scene across one or more captions. Its summary is one caption string using chronological one-sentence-per-line prose. A P episode summarizes a larger process or scene containing ordered E nodes, but its summary stays a short ordinary prose overview rather than a line-by-line record. Static captions can form or extend scene memories; do not invent actions to justify them. Preserve distinct repetitions. Use visual evidence when judging continuity and do not assume identity or persistence across unobserved gaps.
+Return exactly this JSON shape:
+{"events":[{"op":"new","id":"E1","observation_ids":["S0001:O01"],"summary":"first factual sentence\\nsecond factual sentence","continuation_reason":"","support_evidence_ids":["f0001"]}],"episodes":[{"id":"P1","summary":"description of the observed larger process","event_ids":["E1"],"status":"open"}]}
+Allocate every pending caption exactly once as an indivisible unit. A new E uses an unused E ID and empty continuation_reason. Related pending captions may share one E; do not use a fixed event count. Support each newly allocated caption with at least one of its frames shown in this call. Do not add actors, objects, state_changes, location, visible_text, uncertainty, entities or action_key fields. Put relevant information and uncertainty directly in the E summary.
+Use op="continue" with an existing E ID when the new caption extends the same local activity or scene. Include only newly pending observation_ids, a nonempty evidence-grounded continuation_reason, and shown supporting frames from BOTH the old E and new captions. Return the FULL current E caption, including the prior supported lines and new supported lines, rather than only the new continuation. The new evidence must follow the old event evidence. Different wording is not itself a reason to split; the same person or scene alone does not prove one continuous action. If continuity is unclear, create a new E.
+Organize E nodes under P episodes only when justified; standalone E nodes are allowed. Supply the FULL event_ids on every parent update; preserve previous members and update the parent summary to cover all observed stages. An E already assigned to a parent cannot move to another. Updating an E inside a P requires updating that P in the same response. Parents contain only E IDs. There is no merge/delete/split/reparent operation. Status is open or closed; do not describe unseen future goals.
+Use only observed/current IDs. Do not alter or hide source captions or their frames. Each summary at most 150 words; at most 8 event updates and 4 parent updates per call. No markdown or notes outside JSON.
+''' + CAPTION_STYLE_EN
+
+# Preserve the legacy joint-manager API shape. Frozen prior-run prompts remain
+# with their artifacts; the current policy uses an explicit division of
+# responsibilities instead of optional joint grouping.
+EVENT_MANAGER = MANAGER.replace(
+    'Organize E nodes under P episodes only when justified; standalone E nodes are allowed.',
+    'This is the LOCAL EVENT stage. A separate episode organizer runs after you. '
+    'Do not create P nodes or add/remove/reassign parent members in this stage. '
+    'Return episodes=[] unless an E already in a P is updated; in that case refresh '
+    'that existing P summary using exactly its existing event_ids.').replace(
+    '"episodes":[{"id":"P1","summary":"description of the observed larger process","event_ids":["E1"],"status":"open"}]',
+    '"episodes":[]')
+
+EPISODE_ORGANIZER = '''Review the larger processes in the video observed SO FAR.
+You receive immutable source captions, local E events, existing P episodes, ungrouped E IDs and some representative frames. Your job is to organize related E nodes into meaningful larger P processes. Do not rewrite, split, continue, delete or merge E nodes or captions.
+An E is a local activity/scene. A P captures the observed relationship between DISTINCT E stages. For example, preparing ingredients, cooking them and plating can be three different E nodes within one observed food-preparation P. Their actions do not need to match. Grouping under P does NOT assert uninterrupted movement or continuous visibility. A camera cut, a pause or an intervening title does not alone break an otherwise evidenced process.
+There is NO maximum number of child E nodes in a P: five, ten or more children are allowed. Never defer an event because a parent already has several children. Keep its summary concise by abstracting shared context, not by dropping membership. A change of camera direction or local action type ALONE is not a reason to reject a larger-process link. A P is a contextual organization of related observed stages, not a claim that all children form one uninterrupted atomic action.
+Re-examine ALL ungrouped E nodes on every review, including ones deferred earlier. Compare them with each other and with existing P nodes. Prefer extending the appropriate observed process over leaving its supported stages disconnected. Identify a concrete shared activity, object interaction sequence, or coherent exploration trajectory in the actual records. The same room/person, similar appearance or temporal adjacency alone is insufficient. Do not infer hidden goals, future completion or unobserved causal transitions. Do not create a generic parent meaning only 'this video'. Unrelated intro animations, titles or static backgrounds can remain ungrouped; a title alone is not evidence that unrelated footage belongs to one process.
+Return exactly {"episodes":[{"id":"P1","summary":"concise account of the observed related stages","event_ids":["E1","E2"],"status":"open"}],"deferred":[{"event_id":"E3","reason":"specific reason that the observed records do not yet support a larger relationship"}]}.
+Every currently ungrouped E must appear exactly once: either in one proposed P membership or in deferred with a nonempty concrete reason. Do not silently skip roots. Do not defer merely because actions differ, a caption is indivisible, or an E is already a complete local description; those are compatible with a larger P. A new P needs at least TWO distinct E nodes and an unused P ID. Do not create single-child wrapper parents. No target number of P nodes is imposed; all-deferred is allowed when the evidence lacks meaningful links.
+For an existing P you extend, return its FULL old+new event_ids, preserve all old members and refresh its summary to cover observed stages. Do not move E between parents, remove members, fuse P nodes or invent IDs. Order E by first supporting time. Unchanged parents need not be returned. Status is open or closed, based only on what has been observed. Retain ambiguity in prose. At most four P updates per review, each summary at most 150 words; if more updates are needed, defer remaining roots for a later review. Return JSON only.'''

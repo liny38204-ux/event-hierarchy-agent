@@ -1,0 +1,54 @@
+{
+  "repo_id": "openai/clip-vit-base-patch32",
+  "revision": "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268",
+  "files": [
+    {
+      "name": "config.json",
+      "size": 4186,
+      "sha256": null,
+      "git_blob_sha1": "a2a88b96561196777ca173b15309ea859f4d2ce0"
+    },
+    {
+      "name": "merges.txt",
+      "size": 524657,
+      "sha256": null,
+      "git_blob_sha1": "bbfec752c9a675946c6dce106def6f35c882dcc2"
+    },
+    {
+      "name": "preprocessor_config.json",
+      "size": 316,
+      "sha256": null,
+      "git_blob_sha1": "5a12a1eb250987a4eee0e3e7d7338c4b22724be1"
+    },
+    {
+      "name": "pytorch_model.bin",
+      "size": 605247071,
+      "sha256": "a63082132ba4f97a80bea76823f544493bffa8082296d62d71581a4feff1576f",
+      "git_blob_sha1": "c0c935a331cf52e21ce35cee6b9aaa411635bb7a"
+    },
+    {
+      "name": "special_tokens_map.json",
+      "size": 389,
+      "sha256": null,
+      "git_blob_sha1": "9bfb42aa97dcd61e89f279ccaee988bccb4fabae"
+    },
+    {
+      "name": "tokenizer.json",
+      "size": 2224041,
+      "sha256": null,
+      "git_blob_sha1": "564c0ebd5ce29c4ee4864004aee693deadd3128c"
+    },
+    {
+      "name": "tokenizer_config.json",
+      "size": 592,
+      "sha256": null,
+      "git_blob_sha1": "4fdaf6842dd5a725b940c92b6b692490ce59d548"
+    },
+    {
+      "name": "vocab.json",
+      "size": 862328,
+      "sha256": null,
+      "git_blob_sha1": "182766ce89b439768edadda342519f33802f5364"
+    }
+  ]
+}

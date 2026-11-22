@@ -121,6 +121,32 @@ class BufferedPhaseTests(unittest.TestCase):
         result=m.maybe_review(s,20.,changed_event_ids=['E1'])
         self.assertTrue(result['reviewed']);self.assertEqual(s.snapshot()['phases']['PH1']['title'],'片段更新')
 
+    def test_dirty_event_is_visible_beyond_active_suffix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s=BufferedPhaseStore(); frames=[]; events=[]
+            for i in range(1,11):
+                p=Path(tmp)/f'f{i}.jpg';p.write_bytes(str(i).encode())
+                frames.append({'id':f'f{i}','time':float(i),'path':str(p),'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+                events.append({'id':f'E{i}','caption':f'旧观察{i}','frame_ids':[f'f{i}'],'start':float(i),'end':float(i)})
+            s.write(now=10.,frames=frames,events=events,
+                    phases=[{'id':'PH1','title':'长阶段','summary':'旧摘要','event_ids':[f'E{i}' for i in range(1,11)],'status':'open','start':1.,'end':10.}],
+                    episodes=[{'id':'P1','title':'过程','summary':'旧摘要','phase_ids':['PH1'],'status':'open','start':1.,'end':10.}])
+            changed=dict(s.snapshot()['events']['E1']);changed['caption']='E1 的新观察'
+            s.write(now=11.,events=[changed],phases=[s.snapshot()['phases']['PH1']],episodes=[s.snapshot()['episodes']['P1']])
+            captured=[]
+            class B:
+                calls=[]
+                def generate(me, _system, prompt, _evidence, **_kwargs):
+                    captured.append(json.loads(prompt))
+                    return json.dumps({'groups':[],'deferred_event_ids':[],
+                        'refreshes':[{'phase_id':'PH1','phase_title':'长阶段','phase_summary':'已纳入更新观察。',
+                                      'episode_id':'P1','episode_title':'过程','episode_summary':'过程摘要已更新。'}],
+                        'reason':'更新已有阶段摘要。'})
+            BufferedPhaseManager(B(),active_event_limit=2).maybe_review(s,11.,changed_event_ids=['E1'],force=True)
+        active=captured[0]['active_context']
+        self.assertIn('E1',[x['id'] for x in active['events']])
+        self.assertNotIn('E1',active['omitted_event_ids'])
+
     def test_default_waits_for_five_new_events_and_preserves_wait_decision(self):
         s=BufferedPhaseStore();calls=[]
         class B:
@@ -159,6 +185,31 @@ class BufferedPhaseTests(unittest.TestCase):
         result=m.maybe_review(s,35.,changed_event_ids=['E1'])
         self.assertTrue(result['reviewed']);self.assertEqual(result['trigger'],'time_trigger')
         self.assertEqual(len(calls),1)
+
+    def test_bounded_review_consumes_only_visible_prefix_and_preserves_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s=BufferedPhaseStore(); frames=[]; events=[]
+            for i in range(1,6):
+                p=Path(tmp)/f'f{i}.jpg';p.write_bytes(str(i).encode())
+                frames.append({'id':f'f{i}','time':float(i),'path':str(p),
+                               'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+                events.append({'id':f'E{i}','caption':f'事件{i}','frame_ids':[f'f{i}'],
+                               'start':float(i),'end':float(i)})
+            s.write(now=5.,frames=frames,events=events); seen=[]
+            decision={'groups':[{'event_ids':['E1','E2'],'phase_id':'PH1','phase_title':'开始',
+                'phase_summary':'已观察到前两个事件。','episode_id':'P1','episode_title':'过程',
+                'episode_summary':'已观察到过程开端。'}], 'deferred_event_ids':['E3'],
+                'refreshes':[],'reason':'只确认缓存前缀。'}
+            class B:
+                calls=[]
+                def generate(me, system, prompt, evidence, **kwargs):
+                    seen.append(json.loads(prompt)); return json.dumps(decision)
+            result=BufferedPhaseManager(B(),event_trigger=1,review_event_limit=3).maybe_review(
+                s,5.,new_event_ids=['E1','E2','E3','E4','E5'])
+        self.assertEqual(seen[0]['pending_event_ids'],['E1','E2','E3'])
+        self.assertEqual(seen[0]['deferred_tail_event_ids'],['E4','E5'])
+        self.assertEqual(result['decision_view']['deferred_tail_event_ids'],['E4','E5'])
+        self.assertEqual(s.snapshot()['roots'],['E3','E4','E5'])
 
 
 if __name__=='__main__':unittest.main()

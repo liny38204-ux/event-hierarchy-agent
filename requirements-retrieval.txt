@@ -1,0 +1,2 @@
+# Optional local dense text encoder for scripts/search_caption_memory.py.
+sentence-transformers>=5,<6

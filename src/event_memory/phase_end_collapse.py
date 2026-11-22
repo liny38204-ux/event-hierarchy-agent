@@ -5,11 +5,20 @@ and source captions are absent from serialized and in-memory runtime state.
 """
 import json
 
+from .caption_style import CAPTION_STYLE_ZH
 from .direct_frame_memory import DirectFrameMemoryStore, finite, frame_order, ids, text, verify_evidence
 from .protocol import parse_manager_json
 
 SCHEMA = 'phase_end_collapse_memory_v9'
 POLICY = 'all_events_once_after_phase_close'
+COLLAPSE_CONTEXT_LIMIT = 10000
+REPAIR_RAW_LIMIT = 4096
+
+
+def _token_count(backend, value):
+    if hasattr(backend, 'token_count'):
+        return backend.token_count(value)
+    return len(value.split())
 
 
 class PhaseEndCollapseStore(DirectFrameMemoryStore):
@@ -79,11 +88,12 @@ class PhaseEndCollapseStore(DirectFrameMemoryStore):
             return eid
 
 
-COLLAPSER = '''你是流式视频的阶段结束整理器。阶段进行中已经积累多个独立小事件；现在该阶段已经结束，将这个阶段下全部小事件合并为一个完整事件。
+COLLAPSER = r'''你是流式视频的阶段结束整理器。阶段进行中已经积累多个独立小事件；现在该阶段已经结束，将这个阶段下全部小事件合并为一个完整事件。
 输入events按观察时间排序。新caption要按顺序描述这一阶段，保留有证据的不同动作、重复次数、物体变化、文字和不确定性；多个步骤仍是多个步骤，不要编成一次原子动作。不要推测未见行为。
+新caption写成逐行的观察记录，每行一句完整的话；整理输入中的具体观察，不把多段直接拼成一大段，也不压成只有阶段主题的总括句。可以去掉同一次观察的重复措辞，但不能合掉多次发生的实例、用后来状态抹去先前已观察到的状态或删去顺序与有依据的否定信息。每行仍属于同一个合并事件，不生成新的事件节点。
 phase_summary只写一句简短概括，最多80字符；caption最多3000字符。所有event_ids必须完整按输入顺序列出，不得只合并部分、不输出keep、不改变阶段边界。
 程序会删除原小事件记录，新事件直接持有全部帧的有序并集，不保存source、旧caption、别名或历史。support_frame_ids只是本次依据，不是筛帧结果；只可引用visible_frame_ids中实际展示的图片。
-只返回JSON：{"phase_id":"PH1","event_ids":["E1","E2"],"phase_summary":"简短阶段描述。","caption":"合并后的完整描述。","support_frame_ids":["f000001"]}。'''
+只返回JSON：{"phase_id":"PH1","event_ids":["E1","E2"],"phase_summary":"简短阶段描述。","caption":"第一条有证据的观察。\n第二条有证据的观察。","support_frame_ids":["f000001"]}。示例只说明格式，实际行数由观察内容决定。''' + '\n\n' + CAPTION_STYLE_ZH
 
 
 class PhaseEndCollapseManager:
@@ -110,13 +120,17 @@ class PhaseEndCollapseManager:
             payload = {'observed_until': now, 'policy': POLICY, 'phase': phase, 'events': members,
                        'frame_times': {f: s['frames'][f]['time'] for f in fs}, 'visible_frame_ids': chosen}
             base = json.dumps(payload, ensure_ascii=False)
+            # Collapse is deliberately all-or-nothing: do not silently chunk
+            # or omit member captions, because this transaction deletes those
+            # source E records.  A future multi-pass collapse needs its own
+            # provenance-preserving protocol rather than an implicit summary.
+            if _token_count(self.backend, base) > COLLAPSE_CONTEXT_LIMIT:
+                raise ValueError('phase collapse context exceeds cap; refusing lossy implicit chunking while preserving all source events')
             repair = ''; rejected = []
             for attempt in range(3):
                 raw = self.backend.generate(COLLAPSER, base+repair, evidence,
                     stage=f'collapse:{pid}:{attempt}', max_tokens=2048)
                 try:
-                    if getattr(self.backend, 'calls', []) and self.backend.calls[-1].get('finish_reason') == 'length':
-                        raise ValueError('truncated consolidated caption')
                     decision, _ = parse_manager_json(raw)
                     if decision.get('phase_id') != pid:
                         raise ValueError('wrong phase')
@@ -128,7 +142,8 @@ class PhaseEndCollapseManager:
                     break
                 except ValueError as exc:
                     rejected.append(str(exc))
-                    repair = '\n修复校验错误：' + str(exc) + '\n上次回复：' + raw
+                    previous = raw if len(raw) <= REPAIR_RAW_LIMIT else '[省略：上次回复超过修复传输预算，请重新生成完整JSON]'
+                    repair = '\n修复校验错误：' + str(exc) + '\n上次回复：' + previous
             else:
                 raise ValueError(f'phase {pid} collapse failed: {rejected}')
         return results

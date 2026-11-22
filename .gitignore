@@ -6,6 +6,8 @@
 *.key
 credentials*
 .ssh/
+.claude/
+.codex/
 .DS_Store
 .idea/
 .vscode/
