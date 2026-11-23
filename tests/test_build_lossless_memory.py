@@ -134,6 +134,11 @@ class BuildLosslessE2E(unittest.TestCase):
         self.assertEqual(metrics['camera_changes_dropped'], metrics['segments'])
         self.assertEqual(metrics['entities_reused'], metrics['segments'] - 1)
         self.assertEqual(metrics['entities'], 1)
+        import show_lossless_memory
+        text = show_lossless_memory.render(out / 'build')
+        self.assertIn('| H1 | person | person in gray apron |', text)
+        self.assertIn('**Step S1: ', text)
+        self.assertEqual(text.count('- **E'), len(v12['events']))
 
 
 if __name__ == '__main__':
