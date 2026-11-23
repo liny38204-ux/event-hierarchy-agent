@@ -16,8 +16,12 @@ def span(a, b):
 def render(build_dir):
     build_dir = Path(build_dir)
     status = json.loads((build_dir / 'status.json').read_text())
-    doc = json.loads(Path(status['memory_v12']).read_text())
+    path = Path(status['memory_v12'])
+    if not path.is_file():  # copied build: fall back to the local layout
+        path = next((build_dir / 'v12').glob('*/memory_v12.json'))
+    doc = json.loads(path.read_text())
     s, m, out = doc['store'], status.get('metrics', {}), []
+    s.setdefault('entities', {})  # revision 1 builds have no registry
     w = out.append
     w(f"# {doc['video_id']} — v12 memory (r{doc.get('schema_revision', 1)}, observed until {doc['observed_until']:g}s)\n")
     w(' · '.join(f'{k}={m[k]}' for k in ('events', 'steps', 'phases', 'episodes', 'entities', 'reviews', 'place_retries',
@@ -40,7 +44,7 @@ def render(build_dir):
         w(f"{pad}- **{eid}** `{span(e['start'], e['end'])}` {len(e['frame_ids'])} frames — {e['summary']}")
         for line in e['caption'].splitlines()[1:]:
             w(f'{pad}  > {line}')
-        if e['entities']:
+        if e.get('entities'):
             w(f"{pad}  - entities: " + '; '.join(f"{x['id']} ({labels[x['id']]})" for x in e['entities']))
         for c in e['changes']:
             ref = f"[{c['ref']}] " if c.get('ref') else ''
